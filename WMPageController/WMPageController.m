@@ -82,6 +82,11 @@ static NSInteger const kWMControllerCountUndefined = -1;
     return self;
 }
 
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(wm_growCachePolicyAfterMemoryWarning) object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(wm_growCachePolicyToHigh) object:nil];
+}
 
 - (void)forceLayoutSubviews {
     if (!self.childControllersCount) return;
@@ -127,6 +132,12 @@ static NSInteger const kWMControllerCountUndefined = -1;
         [self.menuView selectItemAtIndex:selectIndex];
     } else {
         _markedSelectIndex = selectIndex;
+        UIViewController *vc = [self.memCache objectForKey:@(selectIndex)];
+        if (!vc) {
+            vc = [self initializeViewControllerAtIndex:selectIndex];
+            [self.memCache setObject:vc forKey:@(selectIndex)];
+        }
+        self.currentViewController = vc;
     }
 }
 
@@ -404,20 +415,8 @@ static NSInteger const kWMControllerCountUndefined = -1;
 
 // 包括宽高，子控制器视图 frame
 - (void)wm_calculateSize {
-    if ([self.dataSource respondsToSelector:@selector(pageController:preferredFrameForMenuView:)]) {
-        _menuViewFrame = [self.dataSource pageController:self preferredFrameForMenuView:self.menuView];
-    } else {
-        CGFloat originY = (self.showOnNavigationBar && self.navigationController.navigationBar) ? 0 : CGRectGetMaxY(self.navigationController.navigationBar.frame);
-        _menuViewFrame = CGRectMake(0, originY, self.view.frame.size.width, 30.0f);
-    }
-    if ([self.dataSource respondsToSelector:@selector(pageController:preferredFrameForContentView:)]) {
-        _contentViewFrame = [self.dataSource pageController:self preferredFrameForContentView:self.scrollView];
-    } else {
-        CGFloat originY = (self.showOnNavigationBar && self.navigationController.navigationBar) ? CGRectGetMaxY(self.navigationController.navigationBar.frame) : CGRectGetMaxY(_menuViewFrame);
-        CGFloat tabBarHeight = self.tabBarController.tabBar && !self.tabBarController.tabBar.hidden ? self.tabBarController.tabBar.frame.size.height : 0;
-        CGFloat sizeHeight = self.view.frame.size.height - tabBarHeight - originY;
-        _contentViewFrame = CGRectMake(0, originY, self.view.frame.size.width, sizeHeight);
-    }
+    _menuViewFrame = [self.dataSource pageController:self preferredFrameForMenuView:self.menuView];
+    _contentViewFrame = [self.dataSource pageController:self preferredFrameForContentView:self.scrollView];
     _childViewFrames = [NSMutableArray array];
     for (int i = 0; i < self.childControllersCount; i++) {
         CGRect frame = CGRectMake(i * _contentViewFrame.size.width, 0, _contentViewFrame.size.width, _contentViewFrame.size.height);
@@ -435,7 +434,15 @@ static NSInteger const kWMControllerCountUndefined = -1;
     scrollView.showsHorizontalScrollIndicator = NO;
     scrollView.bounces = self.bounces;
     scrollView.scrollEnabled = self.scrollEnable;
-    [self.view addSubview:scrollView];
+    if (@available(iOS 11.0, *)) {
+        scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    }
+    if ([self isKindOfClass:NSClassFromString(@"GLStickyPageController")]) {
+        UIView *contentView = [self valueForKey:@"contentView"];
+        [contentView addSubview:scrollView];
+    } else {
+        [self.view addSubview:scrollView];
+    }
     self.scrollView = scrollView;
     
     if (!self.navigationController) return;
@@ -456,6 +463,7 @@ static NSInteger const kWMControllerCountUndefined = -1;
     menuView.progressWidths = self.progressViewWidths;
     menuView.progressViewIsNaughty = self.progressViewIsNaughty;
     menuView.progressViewCornerRadius = self.progressViewCornerRadius;
+    menuView.showOnNavigationBar = self.showOnNavigationBar;
     if (self.titleFontName) {
         menuView.fontName = self.titleFontName;
     }
@@ -465,7 +473,12 @@ static NSInteger const kWMControllerCountUndefined = -1;
     if (self.showOnNavigationBar && self.navigationController.navigationBar) {
         self.navigationItem.titleView = menuView;
     } else {
-        [self.view addSubview:menuView];
+        if ([self isKindOfClass:NSClassFromString(@"GLStickyPageController")]) {
+            UIView *contentView = [self valueForKey:@"contentView"];
+            [contentView addSubview:menuView];
+        } else {
+            [self.view addSubview:menuView];
+        }
     }
     self.menuView = menuView;
 }
@@ -616,7 +629,12 @@ static NSInteger const kWMControllerCountUndefined = -1;
         if (self.selectIndex != 0) {
             [self.menuView selectItemAtIndex:self.selectIndex];
         }
-        [self.view bringSubviewToFront:self.menuView];
+        if ([self isKindOfClass:NSClassFromString(@"GLStickyPageController")]) {
+            UIView *contentView = [self valueForKey:@"contentView"];
+            [contentView bringSubviewToFront:self.menuView];
+        } else {
+            [self.view bringSubviewToFront:self.menuView];
+        }
     }
 }
 
@@ -627,10 +645,6 @@ static NSInteger const kWMControllerCountUndefined = -1;
 
 - (void)wm_growCachePolicyToHigh {
     self.cachePolicy = WMPageControllerCachePolicyHigh;
-}
-
-- (UIView *)wm_bottomView {
-    return self.tabBarController.tabBar ? self.tabBarController.tabBar : self.navigationController.toolbar;
 }
 
 #pragma mark - Adjust Frame
@@ -686,7 +700,7 @@ static NSInteger const kWMControllerCountUndefined = -1;
     if (!self.childControllersCount) return;
     [self wm_calculateSize];
     [self wm_addScrollView];
-    [self wm_addViewControllerAtIndex:self.selectIndex];
+    [self wm_initializedControllerWithIndexIfNeeded:self.selectIndex];
     self.currentViewController = self.displayVC[@(self.selectIndex)];
     [self wm_addMenuView];
     [self didEnterController:self.currentViewController atIndex:self.selectIndex];
@@ -700,7 +714,6 @@ static NSInteger const kWMControllerCountUndefined = -1;
     _hasInited = YES;
     [self wm_delaySelectIndexIfNeeded];
 }
-
 
 - (void)didReceiveMemoryWarning {
     [super didReceiveMemoryWarning];
@@ -828,27 +841,15 @@ static NSInteger const kWMControllerCountUndefined = -1;
 
 - (CGFloat)menuView:(WMMenuView *)menu titleSizeForState:(WMMenuItemState)state atIndex:(NSInteger)index {
     switch (state) {
-        case WMMenuItemStateSelected: {
-            return self.titleSizeSelected;
-            break;
-        }
-        case WMMenuItemStateNormal: {
-            return self.titleSizeNormal;
-            break;
-        }
+        case WMMenuItemStateSelected: return self.titleSizeSelected;
+        case WMMenuItemStateNormal: return self.titleSizeNormal;
     }
 }
 
 - (UIColor *)menuView:(WMMenuView *)menu titleColorForState:(WMMenuItemState)state atIndex:(NSInteger)index {
     switch (state) {
-        case WMMenuItemStateSelected: {
-            return self.titleColorSelected;
-            break;
-        }
-        case WMMenuItemStateNormal: {
-            return self.titleColorNormal;
-            break;
-        }
+        case WMMenuItemStateSelected: return self.titleColorSelected;
+        case WMMenuItemStateNormal: return self.titleColorNormal;
     }
 }
 
@@ -859,6 +860,17 @@ static NSInteger const kWMControllerCountUndefined = -1;
 
 - (NSString *)menuView:(WMMenuView *)menu titleAtIndex:(NSInteger)index {
     return [self titleAtIndex:index];
+}
+
+#pragma mark - WMPageControllerDataSource
+- (CGRect)pageController:(WMPageController *)pageController preferredFrameForMenuView:(WMMenuView *)menuView {
+    NSAssert(0, @"[%@] MUST IMPLEMENT DATASOURCE METHOD `-pageController:preferredFrameForMenuView:`", [self.dataSource class]);
+    return CGRectZero;
+}
+
+- (CGRect)pageController:(WMPageController *)pageController preferredFrameForContentView:(WMScrollView *)contentView {
+    NSAssert(0, @"[%@] MUST IMPLEMENT DATASOURCE METHOD `-pageController:preferredFrameForContentView:`", [self.dataSource class]);
+    return CGRectZero;
 }
 
 @end
